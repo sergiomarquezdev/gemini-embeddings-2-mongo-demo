@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+uploads/*
+!uploads/.gitkeep
+.coverage
+htmlcov/
+*.egg-info/
+node_modules/
