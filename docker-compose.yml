@@ -1,0 +1,16 @@
+services:
+  mongo:
+    image: mongodb/mongodb-atlas-local:8.0.5
+    container_name: embeddings_demo_mongo
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand('ping').ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
