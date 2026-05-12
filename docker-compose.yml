@@ -2,6 +2,7 @@ services:
   mongo:
     image: mongodb/mongodb-atlas-local:8.0.5
     container_name: embeddings_demo_mongo
+    hostname: mongo
     restart: unless-stopped
     ports:
       - "127.0.0.1:27017:27017"
