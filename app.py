@@ -6,17 +6,21 @@ from __future__ import annotations
 
 import hashlib
 import os
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import filetype
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 
+from chunking import chunk_text
 from mongo_setup import healthcheck, init_indexes
 from vertex_client import VertexClient
 
@@ -125,3 +129,118 @@ def modality_of(mime: str | None) -> str | None:
     if mime.startswith("text/"):
         return MODALITY_TEXT
     return None
+
+
+# ---------------------------------------------------------------------------
+# Upload helpers
+# ---------------------------------------------------------------------------
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _ensure_within_size(data: bytes):
+    if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(status_code=413,
+                            detail={"error": f"file > {MAX_UPLOAD_MB} MB"})
+
+
+def _existing_doc(db, ch: str):
+    return db[MONGO_COLLECTION].find_one(
+        {"content_hash": ch, "embedding_model": EMBEDDING_MODEL,
+         "embedding_dim": EMBEDDING_DIM, "chunk_index": 0},
+        projection={"parent_doc_id": 1, "n_chunks_total": 1, "created_at": 1, "modality": 1},
+    )
+
+
+def _save_uploaded_file(data: bytes, original_name: str) -> tuple[str, Path]:
+    """Save raw upload to disk under uploads/{uuid}/{sanitized_name}."""
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in original_name)[:120]
+    doc_uuid = str(uuid.uuid4())
+    folder = UPLOADS_DIR / doc_uuid
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / safe
+    path.write_bytes(data)
+    return doc_uuid, path
+
+
+def _insert_chunks(db, docs: list[dict]):
+    try:
+        db[MONGO_COLLECTION].insert_many(docs, ordered=False)
+    except DuplicateKeyError:
+        # race: another request inserted the same doc — caller decides
+        raise
+
+
+def _ingest_text(db, *, vertex: VertexClient, raw_bytes: bytes, filename: str,
+                 mime_type: str, content_h: str, storage_path: Path) -> dict:
+    text = raw_bytes.decode("utf-8", errors="replace")
+    chunks = chunk_text(text, count_tokens=vertex.count_tokens,
+                        max_tokens=7000, overlap_tokens=500)
+    if not chunks:
+        raise HTTPException(status_code=422, detail={"error": "empty text"})
+    parent_doc_id = str(uuid.uuid4())
+    docs = []
+    for ch in chunks:
+        emb = vertex.embed_doc(text=ch.text)
+        docs.append({
+            "parent_doc_id": parent_doc_id,
+            "chunk_index": ch.chunk_index,
+            "n_chunks_total": ch.n_total,
+            "modality": MODALITY_TEXT,
+            "filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(raw_bytes),
+            "storage_path": str(storage_path),
+            "preview_label": ch.text[:500],
+            "content_hash": content_h,
+            "chunk_meta": {"token_count": ch.token_count},
+            "vector": emb.vector,
+            "embedding_model": EMBEDDING_MODEL,
+            "embedding_dim": EMBEDDING_DIM,
+            "embedding_task": emb.task_type_used,
+            "embedding_flags": emb.flags,
+            "status": "ok",
+            "error": None,
+            "retry_count": 0,
+            "created_at": _now(),
+        })
+    _insert_chunks(db, docs)
+    return {"doc_id": parent_doc_id, "n_chunks": len(chunks),
+            "modality": MODALITY_TEXT, "status": "ok"}
+
+
+@app.post("/upload")
+def upload(file: UploadFile = File(...)):
+    raw = file.file.read()
+    _ensure_within_size(raw)
+    mime = sniff_mime(raw, fallback_name=file.filename or "")
+    modality = modality_of(mime)
+    if modality is None:
+        raise HTTPException(status_code=415,
+                            detail={"error": "unsupported mime",
+                                    "detected_mime": mime,
+                                    "supported": sorted(SUPPORTED_IMAGE | SUPPORTED_PDF |
+                                                        SUPPORTED_AUDIO | SUPPORTED_VIDEO |
+                                                        {"text/plain"})})
+
+    ch = content_hash(raw)
+    existing = _existing_doc(app.state.db, ch)
+    if existing:
+        return {"doc_id": existing["parent_doc_id"], "n_chunks": existing["n_chunks_total"],
+                "modality": existing["modality"], "status": "already_indexed",
+                "indexed_at": existing["created_at"].isoformat()}
+
+    _, storage_path = _save_uploaded_file(raw, file.filename or "unnamed")
+
+    if modality == MODALITY_TEXT:
+        try:
+            return _ingest_text(app.state.db, vertex=app.state.vertex,
+                                raw_bytes=raw, filename=file.filename or "",
+                                mime_type=mime, content_h=ch, storage_path=storage_path)
+        except DuplicateKeyError:
+            existing = _existing_doc(app.state.db, ch)
+            return {"doc_id": existing["parent_doc_id"], "n_chunks": existing["n_chunks_total"],
+                    "modality": existing["modality"], "status": "already_indexed"}
+
+    raise HTTPException(status_code=501, detail={"error": f"modality {modality} not yet implemented"})
