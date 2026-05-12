@@ -5,6 +5,7 @@ Single-file monolith for didactic clarity. Helpers in chunking.py and archives.p
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -29,6 +30,7 @@ from mongo_setup import healthcheck, init_indexes
 from vertex_client import VertexClient
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 GCP_PROJECT = os.getenv("GCP_PROJECT", "")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
@@ -410,8 +412,8 @@ def _vector_search(query_vector: list[float], *, modality_filter, limit: int) ->
     ]
     try:
         out = list(app.state.db[MONGO_COLLECTION].aggregate(pipeline))
-    except Exception:
-        # Index may still be in INITIAL_SYNC on a fresh collection — return empty
+    except Exception as exc:
+        logger.warning("vector search failed (likely INITIAL_SYNC): %s", exc)
         out = []
     return {"results": [{
         "doc_id": r["_id"],
