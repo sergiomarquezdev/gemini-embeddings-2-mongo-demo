@@ -4,9 +4,12 @@ Single-file monolith for didactic clarity. Helpers in chunking.py and archives.p
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+import filetype
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -67,3 +70,58 @@ def health():
     h = healthcheck(app.state.db, collection_name=MONGO_COLLECTION)
     h["vertex"] = "configured" if app.state.vertex else "missing GCP_PROJECT"
     return h
+
+
+# ---------------------------------------------------------------------------
+# Helpers: MIME sniffing, hashing, modality dispatch
+# ---------------------------------------------------------------------------
+
+MODALITY_TEXT = "text"
+MODALITY_IMAGE = "image"
+MODALITY_PDF = "pdf"
+MODALITY_AUDIO = "audio"
+MODALITY_VIDEO = "video"
+
+SUPPORTED_AUDIO = {"audio/mp3", "audio/mpeg", "audio/wav"}
+SUPPORTED_VIDEO = {"video/mp4", "video/mpeg"}
+SUPPORTED_IMAGE = {"image/png", "image/jpeg", "image/webp", "image/bmp",
+                   "image/heic", "image/heif", "image/avif"}
+SUPPORTED_PDF = {"application/pdf"}
+SUPPORTED_TEXT_EXT = {".txt", ".md"}
+SUPPORTED_ARCHIVE = {"application/zip", "application/x-zip-compressed",
+                     "application/vnd.rar", "application/x-rar"}
+
+
+def content_hash(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def sniff_mime(data: bytes, *, fallback_name: str = "") -> str | None:
+    """Return MIME from magic bytes, NOT from the upload's Content-Type header.
+
+    Returns None for plain text (filetype can't sniff text). Caller must check extension.
+    """
+    kind = filetype.guess(data[:8192])
+    if kind is not None:
+        return kind.mime
+    # Plain text fallback by extension
+    ext = os.path.splitext(fallback_name.lower())[1]
+    if ext in SUPPORTED_TEXT_EXT:
+        return "text/plain"
+    return None
+
+
+def modality_of(mime: str | None) -> str | None:
+    if mime is None:
+        return None
+    if mime in SUPPORTED_IMAGE:
+        return MODALITY_IMAGE
+    if mime in SUPPORTED_PDF:
+        return MODALITY_PDF
+    if mime in SUPPORTED_AUDIO:
+        return MODALITY_AUDIO
+    if mime in SUPPORTED_VIDEO:
+        return MODALITY_VIDEO
+    if mime.startswith("text/"):
+        return MODALITY_TEXT
+    return None
