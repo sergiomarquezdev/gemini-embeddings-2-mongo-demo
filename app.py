@@ -21,6 +21,7 @@ from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
 from chunking import chunk_text, chunk_pdf, chunk_audio, chunk_video, _audio_duration_seconds
+from archives import extract_archive, ArchiveError, ArchiveEntry
 from mongo_setup import healthcheck, init_indexes
 from vertex_client import VertexClient
 
@@ -274,11 +275,66 @@ def _ingest_av(db, *, vertex, raw, filename, mime, content_h, storage_path, moda
     return {"doc_id": parent_id, "n_chunks": len(chunks), "modality": modality, "status": "ok"}
 
 
+def _ingest_extracted(db, *, vertex, entry: ArchiveEntry, archive_filename: str) -> dict:
+    """Process a single file from inside an archive. Returns a per-file result dict."""
+    if entry.skipped:
+        return {"filename": entry.name, "status": "skipped", "reason": entry.skip_reason}
+    raw = entry.data
+    mime = sniff_mime(raw, fallback_name=entry.name)
+    modality = modality_of(mime)
+    if modality is None:
+        return {"filename": entry.name, "status": "skipped", "reason": f"unsupported mime: {mime}"}
+    ch = content_hash(raw)
+    existing = _existing_doc(db, ch)
+    if existing:
+        return {"filename": entry.name, "doc_id": existing["parent_doc_id"], "status": "already_indexed"}
+    _, storage_path = _save_uploaded_file(raw, entry.name)
+    try:
+        kwargs = dict(raw=raw, filename=entry.name, mime=mime, content_h=ch,
+                      storage_path=storage_path, vertex=vertex)
+        if modality == MODALITY_TEXT:
+            res = _ingest_text(db, raw_bytes=raw, vertex=vertex, filename=entry.name,
+                               mime_type=mime, content_h=ch, storage_path=storage_path)
+        elif modality == MODALITY_IMAGE:
+            res = _ingest_image(db, **kwargs)
+        elif modality == MODALITY_PDF:
+            res = _ingest_pdf(db, **kwargs)
+        else:
+            res = _ingest_av(db, modality=modality, **kwargs)
+    except DuplicateKeyError:
+        existing = _existing_doc(db, ch)
+        return {"filename": entry.name, "doc_id": existing["parent_doc_id"], "status": "already_indexed"}
+    # Mark source_archive on inserted docs
+    db[MONGO_COLLECTION].update_many(
+        {"parent_doc_id": res["doc_id"]},
+        {"$set": {"source_archive": {"filename": archive_filename, "extracted_at": entry.name}}},
+    )
+    return {"filename": entry.name, "doc_id": res["doc_id"], "n_chunks": res["n_chunks"], "status": "ok"}
+
+
 @app.post("/upload")
 def upload(file: UploadFile = File(...)):
     raw = file.file.read()
     _ensure_within_size(raw)
     mime = sniff_mime(raw, fallback_name=file.filename or "")
+
+    if mime in SUPPORTED_ARCHIVE:
+        try:
+            entries = extract_archive(raw, mime_type=mime,
+                                      max_files=MAX_ARCHIVE_FILES,
+                                      max_uncompressed_mb=MAX_ARCHIVE_UNCOMPRESSED_MB)
+        except ArchiveError as e:
+            raise HTTPException(status_code=413, detail={"error": str(e)})
+        results = [_ingest_extracted(app.state.db, vertex=app.state.vertex,
+                                     entry=e, archive_filename=file.filename or "")
+                   for e in entries]
+        summary = {"total": len(results),
+                   "ok": sum(1 for r in results if r["status"] == "ok"),
+                   "already_indexed": sum(1 for r in results if r["status"] == "already_indexed"),
+                   "skipped": sum(1 for r in results if r["status"] == "skipped"),
+                   "failed": sum(1 for r in results if r["status"] == "failed")}
+        return {"archive": file.filename, "extracted": results, "summary": summary}
+
     modality = modality_of(mime)
     if modality is None:
         raise HTTPException(status_code=415,
