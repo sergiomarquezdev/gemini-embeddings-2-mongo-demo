@@ -211,3 +211,79 @@ def chunk_audio(audio_bytes: bytes, *, max_seconds: int = 170, overlap_seconds: 
 
     n = len(chunks)
     return [AudioChunk(audio_bytes=c.audio_bytes, time_start=c.time_start, time_end=c.time_end, chunk_index=c.chunk_index, n_total=n) for c in chunks]
+
+
+@dataclass
+class VideoChunk:
+    video_bytes: bytes  # MP4 format
+    time_start: int
+    time_end: int
+    chunk_index: int
+    n_total: int
+
+
+def _video_duration_seconds(data: bytes) -> float:
+    """Probe video duration via ffprobe using a temp file (Windows pipe issue)."""
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        f.write(data)
+        tmp = Path(f.name)
+    try:
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(tmp)],
+            capture_output=True, check=True,
+        )
+        return float(p.stdout.decode().strip())
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _slice_video(data: bytes, start: int, end: int) -> bytes:
+    """Slice video to a temp file and return the bytes (Windows-safe)."""
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f_in:
+        f_in.write(data)
+        tmp_in = Path(f_in.name)
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f_out:
+        tmp_out = Path(f_out.name)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", str(start), "-i", str(tmp_in),
+             "-t", str(end - start), "-c:v", "libx264", "-c:a", "aac",
+             str(tmp_out)],
+            capture_output=True, check=True,
+        )
+        return tmp_out.read_bytes()
+    finally:
+        tmp_in.unlink(missing_ok=True)
+        tmp_out.unlink(missing_ok=True)
+
+
+def chunk_video(video_bytes: bytes, *, max_seconds: int = 70, overlap_seconds: int = 10) -> list[VideoChunk]:
+    """Split video into chunks of <= max_seconds with overlap.
+
+    Returns MP4 chunks regardless of input encoding.
+    """
+    duration = _video_duration_seconds(video_bytes)
+    if duration <= 81:
+        return [VideoChunk(video_bytes=video_bytes, time_start=0, time_end=int(duration),
+                           chunk_index=0, n_total=1)]
+
+    chunks: list[VideoChunk] = []
+    start = 0
+    while start < duration:
+        end = min(start + max_seconds, int(duration))
+        chunks.append(
+            VideoChunk(
+                video_bytes=_slice_video(video_bytes, start, end),
+                time_start=start,
+                time_end=end,
+                chunk_index=len(chunks),
+                n_total=-1,
+            )
+        )
+        if end >= duration:
+            break
+        start = end - overlap_seconds
+
+    n = len(chunks)
+    return [VideoChunk(video_bytes=c.video_bytes, time_start=c.time_start, time_end=c.time_end, chunk_index=c.chunk_index, n_total=n) for c in chunks]
