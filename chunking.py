@@ -60,10 +60,8 @@ def chunk_text(
         )
         if end >= len(words):
             break
-        # Step forward leaving overlap.
-        # Use a conservative word estimate (overlap_tokens // 4) to ensure
-        # the end of the previous chunk reappears at the start of the next.
-        overlap_word_estimate = max(1, overlap_tokens // 4)
+        # Step forward leaving overlap (assume ~1.5 tokens per word; matches plan).
+        overlap_word_estimate = max(1, int(overlap_tokens / 1.5))
         start = max(start + 1, end - overlap_word_estimate)
 
     n = len(chunks)
