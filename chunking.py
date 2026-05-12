@@ -7,8 +7,11 @@ Each `chunk_*` function returns a list of dataclass instances with a uniform sha
 """
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
 from typing import Callable
+
+from pypdf import PdfReader, PdfWriter
 
 
 @dataclass
@@ -81,3 +84,49 @@ def _find_chunk_end(words: list[str], start: int, max_tokens: int, count_tokens)
         else:
             hi = mid - 1
     return best
+
+
+@dataclass
+class PdfChunk:
+    pdf_bytes: bytes
+    page_start: int  # 1-based inclusive
+    page_end: int    # 1-based inclusive
+    chunk_index: int
+    n_total: int
+
+
+def chunk_pdf(pdf_bytes: bytes, *, max_pages: int = 4, overlap_pages: int = 1) -> list[PdfChunk]:
+    """Split a PDF into chunks of <= max_pages with overlap_pages of overlap.
+
+    Each chunk is a standalone PDF binary that Vertex can ingest directly.
+    Page numbering is 1-based inclusive in returned metadata.
+    """
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    n_pages = len(reader.pages)
+    if n_pages <= 6:  # within hard limit, single chunk
+        return [PdfChunk(pdf_bytes=pdf_bytes, page_start=1, page_end=n_pages, chunk_index=0, n_total=1)]
+
+    chunks: list[PdfChunk] = []
+    start = 0  # 0-based
+    while start < n_pages:
+        end = min(start + max_pages, n_pages)  # 0-based exclusive
+        writer = PdfWriter()
+        for i in range(start, end):
+            writer.add_page(reader.pages[i])
+        buf = io.BytesIO()
+        writer.write(buf)
+        chunks.append(
+            PdfChunk(
+                pdf_bytes=buf.getvalue(),
+                page_start=start + 1,
+                page_end=end,
+                chunk_index=len(chunks),
+                n_total=-1,
+            )
+        )
+        if end >= n_pages:
+            break
+        start = end - overlap_pages
+
+    n = len(chunks)
+    return [PdfChunk(pdf_bytes=c.pdf_bytes, page_start=c.page_start, page_end=c.page_end, chunk_index=c.chunk_index, n_total=n) for c in chunks]
