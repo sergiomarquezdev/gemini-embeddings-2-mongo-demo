@@ -17,7 +17,7 @@ import filetype
 from dotenv import load_dotenv
 from typing import Optional
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
@@ -446,6 +446,11 @@ def search_file(file: UploadFile = File(...)):
 # ---------------------------------------------------------------------------
 # File download
 # ---------------------------------------------------------------------------
+
+@app.get("/")
+def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
 
 @app.get("/files/{doc_id}")
 def serve_file(doc_id: str):
