@@ -290,26 +290,28 @@ def _ingest_extracted(db, *, vertex, entry: ArchiveEntry, archive_filename: str)
         return {"filename": entry.name, "doc_id": existing["parent_doc_id"], "status": "already_indexed"}
     _, storage_path = _save_uploaded_file(raw, entry.name)
     try:
-        kwargs = dict(raw=raw, filename=entry.name, mime=mime, content_h=ch,
-                      storage_path=storage_path, vertex=vertex)
-        if modality == MODALITY_TEXT:
-            res = _ingest_text(db, raw_bytes=raw, vertex=vertex, filename=entry.name,
-                               mime_type=mime, content_h=ch, storage_path=storage_path)
-        elif modality == MODALITY_IMAGE:
-            res = _ingest_image(db, **kwargs)
-        elif modality == MODALITY_PDF:
-            res = _ingest_pdf(db, **kwargs)
-        else:
-            res = _ingest_av(db, modality=modality, **kwargs)
-    except DuplicateKeyError:
-        existing = _existing_doc(db, ch)
-        return {"filename": entry.name, "doc_id": existing["parent_doc_id"], "status": "already_indexed"}
-    # Mark source_archive on inserted docs
-    db[MONGO_COLLECTION].update_many(
-        {"parent_doc_id": res["doc_id"]},
-        {"$set": {"source_archive": {"filename": archive_filename, "extracted_at": entry.name}}},
-    )
-    return {"filename": entry.name, "doc_id": res["doc_id"], "n_chunks": res["n_chunks"], "status": "ok"}
+        try:
+            kwargs = dict(raw=raw, filename=entry.name, mime=mime, content_h=ch,
+                          storage_path=storage_path, vertex=vertex)
+            if modality == MODALITY_TEXT:
+                res = _ingest_text(db, raw_bytes=raw, vertex=vertex, filename=entry.name,
+                                   mime_type=mime, content_h=ch, storage_path=storage_path)
+            elif modality == MODALITY_IMAGE:
+                res = _ingest_image(db, **kwargs)
+            elif modality == MODALITY_PDF:
+                res = _ingest_pdf(db, **kwargs)
+            else:
+                res = _ingest_av(db, modality=modality, **kwargs)
+        except DuplicateKeyError:
+            existing = _existing_doc(db, ch)
+            return {"filename": entry.name, "doc_id": existing["parent_doc_id"], "status": "already_indexed"}
+        db[MONGO_COLLECTION].update_many(
+            {"parent_doc_id": res["doc_id"]},
+            {"$set": {"source_archive": {"filename": archive_filename, "extracted_at": entry.name}}},
+        )
+        return {"filename": entry.name, "doc_id": res["doc_id"], "n_chunks": res["n_chunks"], "status": "ok"}
+    except Exception as exc:
+        return {"filename": entry.name, "status": "failed", "reason": str(exc)}
 
 
 @app.post("/upload")
