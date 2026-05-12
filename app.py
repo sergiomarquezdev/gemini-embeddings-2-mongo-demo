@@ -335,7 +335,7 @@ def upload(file: UploadFile = File(...)):
                                       max_files=MAX_ARCHIVE_FILES,
                                       max_uncompressed_mb=MAX_ARCHIVE_UNCOMPRESSED_MB)
         except ArchiveError as e:
-            raise HTTPException(status_code=413, detail={"error": str(e)})
+            raise HTTPException(status_code=422, detail={"error": str(e)})
         results = [_ingest_extracted(app.state.db, vertex=app.state.vertex,
                                      entry=e, archive_filename=file.filename or "")
                    for e in entries]

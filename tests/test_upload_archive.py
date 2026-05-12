@@ -28,3 +28,33 @@ def test_upload_zip_with_mix_returns_per_file_summary(monkeypatch, test_db_name,
     assert statuses["evil.exe"] == "skipped"
     assert body["summary"]["ok"] == 2
     assert body["summary"]["skipped"] == 1
+
+
+def test_upload_zip_failed_entry_reported_in_summary(monkeypatch, test_db_name, test_db, mock_vertex_client):
+    z = _zip({"good.txt": b"hello", "bad.txt": b"world"})
+    mock_vertex_client.embed_doc.side_effect = [
+        __import__("vertex_client").EmbeddingResult(
+            vector=[0.0] * 1536, task_type_used="RETRIEVAL_DOCUMENT", flags={}
+        ),
+        RuntimeError("boom"),
+    ]
+    monkeypatch.setenv("MONGO_DB", test_db_name)
+    import app as app_module
+    monkeypatch.setattr(app_module, "MONGO_DB", test_db_name)
+    with TestClient(app_module.app) as c:
+        app_module.app.state.vertex = mock_vertex_client
+        r = c.post("/upload", files={"file": ("mix.zip", z, "application/zip")})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["summary"]["ok"] == 1
+    assert body["summary"]["failed"] == 1
+
+
+def test_upload_corrupt_zip_returns_422(monkeypatch, test_db_name, test_db, mock_vertex_client):
+    monkeypatch.setenv("MONGO_DB", test_db_name)
+    import app as app_module
+    monkeypatch.setattr(app_module, "MONGO_DB", test_db_name)
+    with TestClient(app_module.app) as c:
+        app_module.app.state.vertex = mock_vertex_client
+        r = c.post("/upload", files={"file": ("broken.zip", b"PK\x03\x04not-a-real-zip", "application/zip")})
+    assert r.status_code == 422

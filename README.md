@@ -16,7 +16,10 @@ Educational demo: upload any file (text, image, PDF, audio, video, ZIP, RAR) and
 ```bash
 git clone https://github.com/sergiomarquezdev/gemini-embeddings-2-mongo-demo.git
 cd gemini-embeddings-2-mongo-demo
-python -m venv .venv && source .venv/Scripts/activate    # or .venv/bin/activate on Linux/Mac
+python -m venv .venv
+source .venv/bin/activate          # Linux / macOS
+# source .venv/Scripts/activate    # Windows (Git Bash)
+# .venv\Scripts\activate            # Windows (PowerShell / cmd)
 pip install -r requirements.txt
 cp .env.example .env
 # Edit .env and set GCP_PROJECT to your project ID
