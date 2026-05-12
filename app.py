@@ -290,6 +290,7 @@ def _ingest_extracted(db, *, vertex, entry: ArchiveEntry, archive_filename: str)
     modality = modality_of(mime)
     if modality is None:
         return {"filename": entry.name, "status": "skipped", "reason": f"unsupported mime: {mime}"}
+    assert mime is not None  # narrowed by modality_of check above
     ch = content_hash(raw)
     existing = _existing_doc(db, ch)
     if existing:
@@ -313,7 +314,7 @@ def _ingest_extracted(db, *, vertex, entry: ArchiveEntry, archive_filename: str)
             return {"filename": entry.name, "doc_id": existing["parent_doc_id"], "status": "already_indexed"}
         db[MONGO_COLLECTION].update_many(
             {"parent_doc_id": res["doc_id"]},
-            {"$set": {"source_archive": {"filename": archive_filename, "extracted_at": entry.name}}},
+            {"$set": {"source_archive": {"filename": archive_filename, "entry_name": entry.name}}},
         )
         return {"filename": entry.name, "doc_id": res["doc_id"], "n_chunks": res["n_chunks"], "status": "ok"}
     except Exception as exc:
@@ -351,6 +352,7 @@ def upload(file: UploadFile = File(...)):
                                     "supported": sorted(SUPPORTED_IMAGE | SUPPORTED_PDF |
                                                         SUPPORTED_AUDIO | SUPPORTED_VIDEO |
                                                         {"text/plain"})})
+    assert mime is not None  # narrowed by modality_of check above
 
     ch = content_hash(raw)
     existing = _existing_doc(app.state.db, ch)
