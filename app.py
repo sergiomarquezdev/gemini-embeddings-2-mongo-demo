@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from typing import Optional
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -440,3 +441,33 @@ def search_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=415, detail={"error": "unsupported mime"})
     emb = app.state.vertex.embed_query(file_bytes=raw, mime_type=mime)
     return _vector_search(emb.vector, modality_filter=None, limit=10)
+
+
+# ---------------------------------------------------------------------------
+# File download
+# ---------------------------------------------------------------------------
+
+@app.get("/files/{doc_id}")
+def serve_file(doc_id: str):
+    # Validate doc_id: only alnum + hyphen, max 64 chars (rejects path traversal at route level)
+    if not all(c.isalnum() or c == "-" for c in doc_id) or len(doc_id) > 64:
+        raise HTTPException(status_code=400, detail={"error": "invalid doc_id"})
+    doc = app.state.db[MONGO_COLLECTION].find_one(
+        {"parent_doc_id": doc_id},
+        projection={"storage_path": 1, "filename": 1, "mime_type": 1},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail={"error": "doc not found"})
+    p = Path(doc["storage_path"]).resolve()
+    uploads_real = UPLOADS_DIR.resolve()
+    # Defense in depth: ensure resolved path is under uploads/
+    if not str(p).startswith(str(uploads_real)):
+        raise HTTPException(status_code=400, detail={"error": "invalid storage_path"})
+    if not p.exists():
+        raise HTTPException(status_code=404, detail={"error": "file missing on disk"})
+    return FileResponse(
+        path=str(p),
+        media_type=doc["mime_type"],
+        filename=doc["filename"],
+        headers={"Content-Disposition": f'attachment; filename="{doc["filename"]}"'},
+    )
