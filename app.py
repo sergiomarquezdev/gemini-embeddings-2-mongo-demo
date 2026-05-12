@@ -19,11 +19,17 @@ from typing import Optional
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import BulkWriteError, DuplicateKeyError
+
+
+def _is_dup_key_bulk(exc: BulkWriteError) -> bool:
+    """True iff every write error in the bulk failure is a duplicate key (code 11000)."""
+    errors = exc.details.get("writeErrors", []) if exc.details else []
+    return bool(errors) and all(e.get("code") == 11000 for e in errors)
 
 from chunking import chunk_text, chunk_pdf, chunk_audio, chunk_video, _audio_duration_seconds
 from archives import extract_archive, ArchiveError, ArchiveEntry
@@ -100,7 +106,7 @@ SUPPORTED_IMAGE = {"image/png", "image/jpeg", "image/webp", "image/bmp",
 SUPPORTED_PDF = {"application/pdf"}
 SUPPORTED_TEXT_EXT = {".txt", ".md"}
 SUPPORTED_ARCHIVE = {"application/zip", "application/x-zip-compressed",
-                     "application/vnd.rar", "application/x-rar"}
+                     "application/vnd.rar", "application/x-rar", "application/x-rar-compressed"}
 
 
 def content_hash(data: bytes) -> str:
@@ -174,8 +180,12 @@ def _save_uploaded_file(data: bytes, original_name: str) -> tuple[str, Path]:
 def _insert_chunks(db, docs: list[dict]):
     try:
         db[MONGO_COLLECTION].insert_many(docs, ordered=False)
+    except BulkWriteError as exc:
+        if _is_dup_key_bulk(exc):
+            # race: another request inserted the same chunks — caller resolves via _existing_doc
+            raise DuplicateKeyError(exc.details)
+        raise
     except DuplicateKeyError:
-        # race: another request inserted the same doc — caller decides
         raise
 
 
@@ -318,7 +328,9 @@ def _ingest_extracted(db, *, vertex, entry: ArchiveEntry, archive_filename: str)
         )
         return {"filename": entry.name, "doc_id": res["doc_id"], "n_chunks": res["n_chunks"], "status": "ok"}
     except Exception as exc:
-        return {"filename": entry.name, "status": "failed", "reason": str(exc)}
+        logger.exception("archive entry %s failed", entry.name)
+        return {"filename": entry.name, "status": "failed",
+                "reason": f"{type(exc).__name__}"}
 
 
 @app.post("/upload")
@@ -389,10 +401,23 @@ def upload(file: UploadFile = File(...)):
 # Search
 # ---------------------------------------------------------------------------
 
+_VALID_MODALITIES = {"text", "image", "pdf", "audio", "video"}
+
+
 class SearchPayload(BaseModel):
     query: Optional[str] = None
     modality: Optional[list[str]] = None
-    limit: int = 10
+    limit: int = Field(default=10, ge=1, le=50)
+
+    @field_validator("modality")
+    @classmethod
+    def _check_modality(cls, v):
+        if v is None:
+            return v
+        bad = [m for m in v if m not in _VALID_MODALITIES]
+        if bad:
+            raise ValueError(f"unknown modality values: {bad}")
+        return v
 
 
 def _vector_search(query_vector: list[float], *, modality_filter, limit: int) -> dict:
@@ -473,8 +498,8 @@ def serve_file(doc_id: str):
         raise HTTPException(status_code=404, detail={"error": "doc not found"})
     p = Path(doc["storage_path"]).resolve()
     uploads_real = UPLOADS_DIR.resolve()
-    # Defense in depth: ensure resolved path is under uploads/
-    if not str(p).startswith(str(uploads_real)):
+    # Defense in depth: ensure resolved path is under uploads/ (handles uploads_evil prefix bypass)
+    if not p.is_relative_to(uploads_real):
         raise HTTPException(status_code=400, detail={"error": "invalid storage_path"})
     if not p.exists():
         raise HTTPException(status_code=404, detail={"error": "file missing on disk"})
