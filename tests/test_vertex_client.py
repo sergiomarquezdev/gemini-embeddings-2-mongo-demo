@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import pytest
 from vertex_client import VertexClient, EmbeddingResult
 
@@ -52,9 +52,18 @@ def test_embed_doc_falls_back_when_task_type_rejected(mock_genai_client):
 
 def test_embed_doc_pdf_sets_document_ocr_flag(mock_genai_client):
     vc = VertexClient(genai_client=mock_genai_client, model="gemini-embedding-2", dim=1536)
-    vc.embed_doc(file_bytes=b"%PDF-1.7", mime_type="application/pdf")
+    result = vc.embed_doc(file_bytes=b"%PDF-1.7", mime_type="application/pdf")
     cfg = mock_genai_client.models.embed_content.call_args.kwargs["config"]
     assert cfg.document_ocr is True
+    assert result.flags == {"document_ocr": True}
+
+
+def test_embed_doc_video_sets_audio_track_extraction_flag(mock_genai_client):
+    vc = VertexClient(genai_client=mock_genai_client, model="gemini-embedding-2", dim=1536)
+    result = vc.embed_doc(file_bytes=b"\x00\x00\x00\x20ftypmp42", mime_type="video/mp4")
+    cfg = mock_genai_client.models.embed_content.call_args.kwargs["config"]
+    assert cfg.audio_track_extraction is True
+    assert result.flags == {"audio_track_extraction": True}
 
 
 def test_count_tokens_returns_int(mock_genai_client):
