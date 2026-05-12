@@ -1,8 +1,12 @@
 """MongoDB setup: connection helpers, index creation (vector + dedup), healthcheck."""
 from __future__ import annotations
 
+import logging
+
 from pymongo.database import Database
 from pymongo.operations import SearchIndexModel
+
+logger = logging.getLogger(__name__)
 
 
 def init_indexes(db: Database, *, vector_dim: int, collection_name: str = "documents") -> None:
@@ -33,8 +37,8 @@ def init_indexes(db: Database, *, vector_dim: int, collection_name: str = "docum
                 type="vectorSearch",
             )
             coll.create_search_index(model=model)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("vector index creation skipped: %s", exc)
 
 
 def healthcheck(db: Database, *, collection_name: str = "documents") -> dict:

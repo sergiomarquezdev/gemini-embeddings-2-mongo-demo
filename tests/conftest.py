@@ -3,7 +3,6 @@
 Mongo: real container at localhost:27017 (started via `docker compose up -d mongo`).
 Vertex: mocked.
 """
-import os
 import uuid
 from unittest.mock import MagicMock
 import pytest
