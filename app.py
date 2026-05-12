@@ -323,6 +323,8 @@ def _ingest_extracted(db, *, vertex, entry: ArchiveEntry, archive_filename: str)
 
 @app.post("/upload")
 def upload(file: UploadFile = File(...)):
+    if app.state.vertex is None:
+        raise HTTPException(status_code=503, detail={"error": "Vertex AI not configured (set GCP_PROJECT)"})
     raw = file.file.read()
     _ensure_within_size(raw)
     mime = sniff_mime(raw, fallback_name=file.filename or "")
@@ -428,6 +430,8 @@ def _vector_search(query_vector: list[float], *, modality_filter, limit: int) ->
 
 @app.post("/search")
 def search(payload: SearchPayload = Body(...)):
+    if app.state.vertex is None:
+        raise HTTPException(status_code=503, detail={"error": "Vertex AI not configured (set GCP_PROJECT)"})
     if not payload.query:
         raise HTTPException(status_code=400, detail={"error": "provide query or file"})
     emb = app.state.vertex.embed_query(text=payload.query)
@@ -436,6 +440,8 @@ def search(payload: SearchPayload = Body(...)):
 
 @app.post("/search/file")
 def search_file(file: UploadFile = File(...)):
+    if app.state.vertex is None:
+        raise HTTPException(status_code=503, detail={"error": "Vertex AI not configured (set GCP_PROJECT)"})
     raw = file.file.read()
     _ensure_within_size(raw)
     mime = sniff_mime(raw, fallback_name=file.filename or "")
