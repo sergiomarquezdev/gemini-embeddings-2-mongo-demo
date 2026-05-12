@@ -93,5 +93,36 @@ def _extract_zip(data: bytes, *, max_files: int, max_uncompressed_mb: int) -> li
 
 
 def _extract_rar(data: bytes, *, max_files: int, max_uncompressed_mb: int) -> list[ArchiveEntry]:
-    """RAR extraction (T9 will refine). For T8, raise NotImplementedError if called."""
-    raise NotImplementedError("RAR extraction is implemented in T9")
+    import rarfile
+    max_bytes = max_uncompressed_mb * 1024 * 1024
+    try:
+        rf = rarfile.RarFile(io.BytesIO(data))
+    except rarfile.Error as e:
+        raise ArchiveError(f"corrupt rar: {e}") from e
+
+    if rf.needs_password():
+        raise ArchiveError("encrypted archive not supported")
+
+    infos = [i for i in rf.infolist() if not i.isdir()]
+    if len(infos) > max_files:
+        raise ArchiveError(f"too many files: {len(infos)} > {max_files}")
+
+    total = sum(i.file_size for i in infos)
+    if total > max_bytes:
+        raise ArchiveError(
+            f"archive exceeds uncompressed cap: {total // (1024*1024)} MB > {max_uncompressed_mb} MB"
+        )
+
+    out: list[ArchiveEntry] = []
+    for info in infos:
+        if not _is_safe_path(info.filename):
+            out.append(ArchiveEntry(name=info.filename, data=None, skipped=True,
+                                    skip_reason="unsafe path"))
+            continue
+        ext = os.path.splitext(info.filename)[1].lower()
+        if ext in _NESTED_EXTS:
+            out.append(ArchiveEntry(name=info.filename, data=None, skipped=True,
+                                    skip_reason="nested archive (depth=1 policy)"))
+            continue
+        out.append(ArchiveEntry(name=info.filename, data=rf.read(info)))
+    return out
