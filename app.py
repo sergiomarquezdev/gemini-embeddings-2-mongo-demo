@@ -14,7 +14,10 @@ from pathlib import Path
 import filetype
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from typing import Optional
+
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pymongo import MongoClient
@@ -373,3 +376,65 @@ def upload(file: UploadFile = File(...)):
         return {"doc_id": existing["parent_doc_id"], "n_chunks": existing["n_chunks_total"],
                 "modality": existing["modality"], "status": "already_indexed"}
     raise HTTPException(status_code=415, detail={"error": "unhandled modality"})
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+class SearchPayload(BaseModel):
+    query: Optional[str] = None
+    modality: Optional[list[str]] = None
+    limit: int = 10
+
+
+def _vector_search(query_vector: list[float], *, modality_filter, limit: int) -> dict:
+    vfilter: dict = {"status": "ok"}
+    if modality_filter:
+        vfilter["modality"] = {"$in": modality_filter}
+    pipeline = [
+        {"$vectorSearch": {
+            "index": "vector_index", "path": "vector", "queryVector": query_vector,
+            "numCandidates": limit * 20, "limit": limit * 2, "filter": vfilter,
+        }},
+        {"$project": {"score": {"$meta": "vectorSearchScore"},
+                      "parent_doc_id": 1, "chunk_index": 1, "modality": 1,
+                      "filename": 1, "preview_label": 1, "chunk_meta": 1}},
+        {"$sort": {"parent_doc_id": 1, "score": -1}},
+        {"$group": {"_id": "$parent_doc_id",
+                    "best_score": {"$first": "$score"},
+                    "best_chunk": {"$first": "$$ROOT"},
+                    "matched_chunks": {"$sum": 1}}},
+        {"$sort": {"best_score": -1}},
+        {"$limit": limit},
+    ]
+    try:
+        out = list(app.state.db[MONGO_COLLECTION].aggregate(pipeline))
+    except Exception:
+        # Index may still be in INITIAL_SYNC on a fresh collection — return empty
+        out = []
+    return {"results": [{
+        "doc_id": r["_id"],
+        "score": r["best_score"],
+        "matched_chunks": r["matched_chunks"],
+        "best_chunk": {k: v for k, v in r["best_chunk"].items() if k != "_id"},
+    } for r in out]}
+
+
+@app.post("/search")
+def search(payload: SearchPayload = Body(...)):
+    if not payload.query:
+        raise HTTPException(status_code=400, detail={"error": "provide query or file"})
+    emb = app.state.vertex.embed_query(text=payload.query)
+    return _vector_search(emb.vector, modality_filter=payload.modality, limit=payload.limit)
+
+
+@app.post("/search/file")
+def search_file(file: UploadFile = File(...)):
+    raw = file.file.read()
+    _ensure_within_size(raw)
+    mime = sniff_mime(raw, fallback_name=file.filename or "")
+    if modality_of(mime) is None:
+        raise HTTPException(status_code=415, detail={"error": "unsupported mime"})
+    emb = app.state.vertex.embed_query(file_bytes=raw, mime_type=mime)
+    return _vector_search(emb.vector, modality_filter=None, limit=10)
