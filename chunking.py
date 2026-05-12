@@ -8,7 +8,10 @@ Each `chunk_*` function returns a list of dataclass instances with a uniform sha
 from __future__ import annotations
 
 import io
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from pypdf import PdfReader, PdfWriter
@@ -130,3 +133,81 @@ def chunk_pdf(pdf_bytes: bytes, *, max_pages: int = 4, overlap_pages: int = 1) -
 
     n = len(chunks)
     return [PdfChunk(pdf_bytes=c.pdf_bytes, page_start=c.page_start, page_end=c.page_end, chunk_index=c.chunk_index, n_total=n) for c in chunks]
+
+
+@dataclass
+class AudioChunk:
+    audio_bytes: bytes  # WAV format
+    time_start: int     # seconds, 0-based
+    time_end: int       # seconds, exclusive
+    chunk_index: int
+    n_total: int
+
+
+def _audio_duration_seconds(data: bytes) -> float:
+    """Get audio duration in seconds. Uses a temp file to avoid WAV pipe header issues."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", "-i", tmp_path],
+            capture_output=True, check=True,
+        )
+        return float(p.stdout.decode().strip())
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _slice_audio(data: bytes, start: int, end: int) -> bytes:
+    """Use ffmpeg to slice audio into a WAV chunk. Output is always WAV mono 16k.
+
+    Uses temp files to avoid Windows pipe issues with large WAV streams.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_in:
+        tmp_in.write(data)
+        tmp_in_path = tmp_in.name
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_out:
+        tmp_out_path = tmp_out.name
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", str(start), "-i", tmp_in_path,
+             "-t", str(end - start), "-ar", "16000", "-ac", "1", tmp_out_path],
+            capture_output=True, check=True,
+        )
+        return Path(tmp_out_path).read_bytes()
+    finally:
+        Path(tmp_in_path).unlink(missing_ok=True)
+        Path(tmp_out_path).unlink(missing_ok=True)
+
+
+def chunk_audio(audio_bytes: bytes, *, max_seconds: int = 170, overlap_seconds: int = 10) -> list[AudioChunk]:
+    """Split audio into chunks of <= max_seconds with overlap.
+
+    Returns WAV chunks regardless of input format.
+    """
+    duration = _audio_duration_seconds(audio_bytes)
+    if duration <= 180:  # within hard limit
+        return [AudioChunk(audio_bytes=audio_bytes, time_start=0, time_end=int(duration),
+                           chunk_index=0, n_total=1)]
+
+    chunks: list[AudioChunk] = []
+    start = 0
+    while start < duration:
+        end = min(start + max_seconds, int(duration))
+        chunks.append(
+            AudioChunk(
+                audio_bytes=_slice_audio(audio_bytes, start, end),
+                time_start=start,
+                time_end=end,
+                chunk_index=len(chunks),
+                n_total=-1,
+            )
+        )
+        if end >= duration:
+            break
+        start = end - overlap_seconds
+
+    n = len(chunks)
+    return [AudioChunk(audio_bytes=c.audio_bytes, time_start=c.time_start, time_end=c.time_end, chunk_index=c.chunk_index, n_total=n) for c in chunks]
