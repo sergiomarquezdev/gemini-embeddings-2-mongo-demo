@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
-from chunking import chunk_text
+from chunking import chunk_text, chunk_pdf, chunk_audio, chunk_video, _audio_duration_seconds
 from mongo_setup import healthcheck, init_indexes
 from vertex_client import VertexClient
 
@@ -86,7 +86,7 @@ MODALITY_PDF = "pdf"
 MODALITY_AUDIO = "audio"
 MODALITY_VIDEO = "video"
 
-SUPPORTED_AUDIO = {"audio/mp3", "audio/mpeg", "audio/wav"}
+SUPPORTED_AUDIO = {"audio/mp3", "audio/mpeg", "audio/wav", "audio/x-wav"}
 SUPPORTED_VIDEO = {"video/mp4", "video/mpeg"}
 SUPPORTED_IMAGE = {"image/png", "image/jpeg", "image/webp", "image/bmp",
                    "image/heic", "image/heif", "image/avif"}
@@ -210,6 +210,70 @@ def _ingest_text(db, *, vertex: VertexClient, raw_bytes: bytes, filename: str,
             "modality": MODALITY_TEXT, "status": "ok"}
 
 
+def _base_chunk_doc(parent_id, ch_index, n_total, modality, filename, mime,
+                    size, storage_path, preview, content_h, meta, emb):
+    return {
+        "parent_doc_id": parent_id, "chunk_index": ch_index, "n_chunks_total": n_total,
+        "modality": modality, "filename": filename, "mime_type": mime, "size_bytes": size,
+        "storage_path": str(storage_path), "preview_label": preview,
+        "content_hash": content_h, "chunk_meta": meta,
+        "vector": emb.vector, "embedding_model": EMBEDDING_MODEL,
+        "embedding_dim": EMBEDDING_DIM, "embedding_task": emb.task_type_used,
+        "embedding_flags": emb.flags, "status": "ok", "error": None,
+        "retry_count": 0, "created_at": _now(),
+    }
+
+
+def _ingest_image(db, *, vertex, raw, filename, mime, content_h, storage_path):
+    parent_id = str(uuid.uuid4())
+    emb = vertex.embed_doc(file_bytes=raw, mime_type=mime)
+    doc = _base_chunk_doc(parent_id, 0, 1, MODALITY_IMAGE, filename, mime,
+                          len(raw), storage_path, f"image {mime}", content_h, {}, emb)
+    _insert_chunks(db, [doc])
+    return {"doc_id": parent_id, "n_chunks": 1, "modality": MODALITY_IMAGE, "status": "ok"}
+
+
+def _ingest_pdf(db, *, vertex, raw, filename, mime, content_h, storage_path):
+    chunks = chunk_pdf(raw, max_pages=4, overlap_pages=1)
+    parent_id = str(uuid.uuid4())
+    docs = []
+    for ch in chunks:
+        emb = vertex.embed_doc(file_bytes=ch.pdf_bytes, mime_type="application/pdf")
+        docs.append(_base_chunk_doc(parent_id, ch.chunk_index, ch.n_total, MODALITY_PDF,
+                                    filename, mime, len(raw), storage_path,
+                                    f"PDF pages {ch.page_start}-{ch.page_end}",
+                                    content_h, {"page_start": ch.page_start, "page_end": ch.page_end}, emb))
+    _insert_chunks(db, docs)
+    return {"doc_id": parent_id, "n_chunks": len(chunks), "modality": MODALITY_PDF, "status": "ok"}
+
+
+def _ingest_av(db, *, vertex, raw, filename, mime, content_h, storage_path, modality):
+    duration = _audio_duration_seconds(raw)
+    if duration > MAX_TOTAL_EMBED_SECONDS:
+        raise HTTPException(status_code=413,
+                            detail={"error": "embedding budget exceeded",
+                                    "limit_seconds": MAX_TOTAL_EMBED_SECONDS,
+                                    "requested_seconds": int(duration)})
+    if modality == MODALITY_AUDIO:
+        chunks = chunk_audio(raw, max_seconds=170, overlap_seconds=10)
+        chunk_bytes_attr = "audio_bytes"
+        media_mime = "audio/wav"
+    else:
+        chunks = chunk_video(raw, max_seconds=70, overlap_seconds=10)
+        chunk_bytes_attr = "video_bytes"
+        media_mime = "video/mp4"
+    parent_id = str(uuid.uuid4())
+    docs = []
+    for ch in chunks:
+        emb = vertex.embed_doc(file_bytes=getattr(ch, chunk_bytes_attr), mime_type=media_mime)
+        docs.append(_base_chunk_doc(parent_id, ch.chunk_index, ch.n_total, modality,
+                                    filename, mime, len(raw), storage_path,
+                                    f"{modality} {ch.time_start}-{ch.time_end}s",
+                                    content_h, {"time_start": ch.time_start, "time_end": ch.time_end}, emb))
+    _insert_chunks(db, docs)
+    return {"doc_id": parent_id, "n_chunks": len(chunks), "modality": modality, "status": "ok"}
+
+
 @app.post("/upload")
 def upload(file: UploadFile = File(...)):
     raw = file.file.read()
@@ -233,14 +297,21 @@ def upload(file: UploadFile = File(...)):
 
     _, storage_path = _save_uploaded_file(raw, file.filename or "unnamed")
 
-    if modality == MODALITY_TEXT:
-        try:
-            return _ingest_text(app.state.db, vertex=app.state.vertex,
-                                raw_bytes=raw, filename=file.filename or "",
-                                mime_type=mime, content_h=ch, storage_path=storage_path)
-        except DuplicateKeyError:
-            existing = _existing_doc(app.state.db, ch)
-            return {"doc_id": existing["parent_doc_id"], "n_chunks": existing["n_chunks_total"],
-                    "modality": existing["modality"], "status": "already_indexed"}
-
-    raise HTTPException(status_code=501, detail={"error": f"modality {modality} not yet implemented"})
+    try:
+        kwargs = dict(raw=raw, filename=file.filename or "", mime=mime,
+                      content_h=ch, storage_path=storage_path, vertex=app.state.vertex)
+        if modality == MODALITY_TEXT:
+            return _ingest_text(app.state.db, raw_bytes=raw, filename=file.filename or "",
+                                mime_type=mime, content_h=ch, storage_path=storage_path,
+                                vertex=app.state.vertex)
+        if modality == MODALITY_IMAGE:
+            return _ingest_image(app.state.db, **kwargs)
+        if modality == MODALITY_PDF:
+            return _ingest_pdf(app.state.db, **kwargs)
+        if modality in (MODALITY_AUDIO, MODALITY_VIDEO):
+            return _ingest_av(app.state.db, modality=modality, **kwargs)
+    except DuplicateKeyError:
+        existing = _existing_doc(app.state.db, ch)
+        return {"doc_id": existing["parent_doc_id"], "n_chunks": existing["n_chunks_total"],
+                "modality": existing["modality"], "status": "already_indexed"}
+    raise HTTPException(status_code=415, detail={"error": "unhandled modality"})

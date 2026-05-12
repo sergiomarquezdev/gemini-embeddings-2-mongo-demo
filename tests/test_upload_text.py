@@ -6,6 +6,7 @@ def test_upload_txt_creates_one_chunk(monkeypatch, test_db_name, test_db, mock_v
     monkeypatch.setenv("EMBEDDING_DIM", "1536")
     monkeypatch.setenv("EMBEDDING_MODEL", "gemini-embedding-2")
     import app as app_module
+    monkeypatch.setattr(app_module, "MONGO_DB", test_db_name)
     with TestClient(app_module.app) as c:
         app_module.app.state.vertex = mock_vertex_client
         r = c.post("/upload", files={"file": ("hello.txt", b"Hello world", "text/plain")})
@@ -22,6 +23,7 @@ def test_upload_same_file_twice_returns_already_indexed(monkeypatch, test_db_nam
     monkeypatch.setenv("EMBEDDING_DIM", "1536")
     monkeypatch.setenv("EMBEDDING_MODEL", "gemini-embedding-2")
     import app as app_module
+    monkeypatch.setattr(app_module, "MONGO_DB", test_db_name)
     with TestClient(app_module.app) as c:
         app_module.app.state.vertex = mock_vertex_client
         r1 = c.post("/upload", files={"file": ("a.txt", b"same content", "text/plain")})
@@ -36,6 +38,7 @@ def test_upload_unsupported_mime_returns_415(monkeypatch, test_db_name, test_db,
     monkeypatch.setenv("EMBEDDING_DIM", "1536")
     monkeypatch.setenv("EMBEDDING_MODEL", "gemini-embedding-2")
     import app as app_module
+    monkeypatch.setattr(app_module, "MONGO_DB", test_db_name)
     with TestClient(app_module.app) as c:
         app_module.app.state.vertex = mock_vertex_client
         # MZ = Windows exe magic
